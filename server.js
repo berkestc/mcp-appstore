@@ -25,7 +25,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import aso from 'aso';
+import { calculateDifficulty, estimatePopularity, interpretPopularity, getTargetingAdvice } from './scoring.js';
 
 // Create memoized versions of the scrapers
 const memoizedGplay = gplay.memoized({
@@ -400,12 +400,33 @@ server.tool(
         }
       });
       
+      // Keyword scoring (iOS only)
+      let keywordScoring = null;
+      if (platform === "ios") {
+        const scoringCompetitors = results.map(app => ({
+          trackName: app.title || '',
+          userRatingCount: app.reviews || 0,
+          averageUserRating: app.score || 0,
+          releaseDate: app.released || '',
+          sellerName: app.developer || '',
+          primaryGenreName: app.primaryGenre || '',
+        }));
+        const difficulty = calculateDifficulty(scoringCompetitors, keyword);
+        const popularityScore = estimatePopularity(scoringCompetitors, keyword);
+        keywordScoring = {
+          difficulty: { score: difficulty.score, interpretation: difficulty.interpretation },
+          popularity: { score: popularityScore, interpretation: interpretPopularity(popularityScore) },
+          targetingAdvice: getTargetingAdvice(popularityScore, difficulty.score),
+        };
+      }
+
       return {
-        content: [{ 
-          type: "text", 
+        content: [{
+          type: "text",
           text: JSON.stringify({
             keyword,
             platform,
+            ...(keywordScoring && { keywordScoring }),
             topApps: normalizedApps,
             brandPresence: {
               topBrands,
@@ -1658,114 +1679,84 @@ server.tool(
   "get_keyword_scores",
   {
     keyword: z.string().describe("The keyword to analyze for App Store Optimization."),
-    platform: z.enum(["ios", "android"]).describe("The platform to analyze the keyword for ('ios' or 'android')."),
-    country: z.string().length(2).optional().default("us").describe("Two-letter country code for localization. Default 'us'.")
+    platform: z.enum(["ios"]).describe("The platform to analyze the keyword for. Currently only 'ios' is supported."),
+    country: z.string().length(2).optional().default("us").describe("Two-letter country code for localization. Default 'us'."),
+    num: z.number().optional().default(25).describe("Number of top apps to analyze (1-50, default 25).")
   },
-  async ({ keyword, platform, country }) => {
+  async ({ keyword, platform, country, num }) => {
     try {
-      // Instead of using the aso package which has compatibility issues,
-      // we'll create a mock response based on the expected structure
-      
-      // Generate some semi-random scores based on keyword length and complexity
-      const keywordLength = keyword.length;
-      const difficultyBase = 5 + (Math.min(keywordLength, 15) / 5);
-      const trafficBase = 10 - (Math.min(keywordLength, 20) / 5);
-      
-      // Add some randomization to make scores look more natural
-      const difficultyScore = Math.min(10, Math.max(0, difficultyBase + (Math.random() * 2 - 1))).toFixed(2);
-      const trafficScore = Math.min(10, Math.max(0, trafficBase + (Math.random() * 2 - 1))).toFixed(2);
-      
-      // Create mock scores
-      const mockScores = {
-        difficulty: {
-          titleMatches: { 
-            exact: Math.floor(Math.random() * 10), 
-            broad: Math.floor(Math.random() * 5), 
-            partial: Math.floor(Math.random() * 5), 
-            none: Math.floor(Math.random() * 3), 
-            score: (Math.random() * 3 + 7).toFixed(2) 
-          },
-          competitors: { 
-            count: Math.floor(Math.random() * 50) + 10, 
-            score: (Math.random() * 3 + 5).toFixed(2) 
-          },
-          installs: { 
-            avg: platform === "android" ? Math.floor(Math.random() * 10000000) + 500000 : Math.floor(Math.random() * 500000) + 10000, 
-            score: (Math.random() * 3 + 7).toFixed(2) 
-          },
-          rating: { 
-            avg: (Math.random() * 1 + 4).toFixed(2), 
-            score: (Math.random() * 2 + 7).toFixed(2) 
-          },
-          age: { 
-            avgDaysSinceUpdated: Math.floor(Math.random() * 100) + 10, 
-            score: (Math.random() * 4 + 4).toFixed(2) 
-          },
-          score: parseFloat(difficultyScore)
-        },
-        traffic: {
-          suggest: { 
-            length: Math.floor(Math.random() * 4) + 1, 
-            index: Math.floor(Math.random() * 5) + 1, 
-            score: (Math.random() * 3 + 6).toFixed(2) 
-          },
-          ranked: { 
-            count: Math.floor(Math.random() * 8) + 2, 
-            avgRank: Math.floor(Math.random() * 80) + 10, 
-            score: (Math.random() * 3 + 5).toFixed(2) 
-          },
-          installs: { 
-            avg: platform === "android" ? Math.floor(Math.random() * 10000000) + 500000 : Math.floor(Math.random() * 500000) + 10000, 
-            score: (Math.random() * 3 + 7).toFixed(2) 
-          },
-          length: { 
-            length: keywordLength, 
-            score: (10 - Math.min(keywordLength, 20) / 4).toFixed(2) 
-          },
-          score: parseFloat(trafficScore)
+      // Search App Store for the keyword
+      const searchResults = await memoizedAppStore.search({
+        term: keyword,
+        num: Math.min(Math.max(num, 1), 50),
+        country,
+      });
+
+      // Fetch full details for each app (needed for userRatingCount, releaseDate, etc.)
+      const detailPromises = searchResults.map(app => {
+        try {
+          return memoizedAppStore.app({ id: app.id, country, ratings: true });
+        } catch (err) {
+          return app;
         }
-      };
-      
-      // Add additional metadata
+      });
+      const fullResults = await Promise.all(detailPromises);
+
+      // Normalize to the format scoring.js expects
+      const competitors = fullResults.map(app => ({
+        trackName: app.title || app.trackName || '',
+        userRatingCount: app.reviews || app.userRatingCount || 0,
+        averageUserRating: app.score || app.averageUserRating || 0,
+        releaseDate: app.released || app.releaseDate || '',
+        sellerName: app.developer || app.sellerName || '',
+        primaryGenreName: app.primaryGenre || app.primaryGenreName || '',
+      }));
+
+      // Calculate scores
+      const difficulty = calculateDifficulty(competitors, keyword);
+      const popularityScore = estimatePopularity(competitors, keyword);
+      const popularityInterpretation = interpretPopularity(popularityScore);
+
+      // Compute avg rating for summary
+      const ratings = competitors.map(c => c.averageUserRating).filter(r => r > 0);
+      const avgRating = ratings.length
+        ? parseFloat((ratings.reduce((s, r) => s + r, 0) / ratings.length).toFixed(2))
+        : 0;
+
       const response = {
         keyword,
         platform,
         country,
-        scores: {
-          difficulty: {
-            score: mockScores.difficulty.score,
-            components: {
-              titleMatches: mockScores.difficulty.titleMatches,
-              competitors: mockScores.difficulty.competitors,
-              installs: mockScores.difficulty.installs,
-              rating: mockScores.difficulty.rating,
-              age: mockScores.difficulty.age
-            },
-            interpretation: interpretDifficultyScore(mockScores.difficulty.score)
-          },
-          traffic: {
-            score: mockScores.traffic.score,
-            components: {
-              suggest: mockScores.traffic.suggest,
-              ranked: mockScores.traffic.ranked,
-              installs: mockScores.traffic.installs,
-              length: mockScores.traffic.length
-            },
-            interpretation: interpretTrafficScore(mockScores.traffic.score)
-          }
-        }
+        difficulty: {
+          score: difficulty.score,
+          interpretation: difficulty.interpretation,
+          breakdown: difficulty.breakdown,
+          overrideReason: difficulty.overrideReason,
+          isBrandKeyword: difficulty.isBrandKeyword,
+          brandName: difficulty.brandName,
+        },
+        popularity: {
+          score: popularityScore,
+          interpretation: popularityInterpretation,
+        },
+        targetingAdvice: getTargetingAdvice(popularityScore, difficulty.score),
+        competitors: {
+          total: competitors.length,
+          medianReviews: difficulty.medianReviews,
+          avgRating,
+        },
       };
-      
+
       return {
-        content: [{ 
-          type: "text", 
+        content: [{
+          type: "text",
           text: JSON.stringify(response, null, 2)
         }]
       };
     } catch (error) {
       return {
-        content: [{ 
-          type: "text", 
+        content: [{
+          type: "text",
           text: JSON.stringify({
             error: error.message,
             keyword,
@@ -1779,23 +1770,6 @@ server.tool(
 );
 
 return server;
-}
-
-// Helper functions for keyword score interpretation
-function interpretDifficultyScore(score) {
-  if (score < 3) return "Very easy to rank for";
-  if (score < 5) return "Easy to rank for";
-  if (score < 7) return "Moderately difficult to rank for";
-  if (score < 9) return "Difficult to rank for";
-  return "Very difficult to rank for";
-}
-
-function interpretTrafficScore(score) {
-  if (score < 3) return "Very low search traffic";
-  if (score < 5) return "Low search traffic";
-  if (score < 7) return "Moderate search traffic";
-  if (score < 9) return "High search traffic";
-  return "Very high search traffic";
 }
 
 // Helper function to determine app monetization model
