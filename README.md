@@ -707,20 +707,21 @@ const result = await client.callTool({
 
 ### 11. get_keyword_scores
 
-Analyzes a keyword for App Store Optimization (ASO) and returns difficulty and traffic scores to evaluate its potential.
+Analyzes a keyword for App Store Optimization (ASO) using real App Store search data. Returns difficulty score (1-100), popularity score (5-100), and targeting advice. Scoring algorithm ported from [RespectASO](https://github.com/respectlytics/respectaso).
 
 **Parameters:**
 - `keyword`: The keyword to analyze for App Store Optimization.
-- `platform`: The platform to analyze the keyword for (`ios` or `android`).
+- `platform`: The platform to analyze (`ios` only, Android support coming soon).
 - `country` (optional): Two-letter country code for localization. Default 'us'.
+- `num` (optional): Number of top apps to analyze (1-50, default 25).
 
 **Example usage:**
 ```javascript
 const result = await client.callTool({
   name: "get_keyword_scores",
   arguments: {
-    keyword: "music streaming",
-    platform: "android"
+    keyword: "meditation",
+    platform: "ios"
   }
 });
 ```
@@ -728,70 +729,61 @@ const result = await client.callTool({
 **Response:**
 ```json
 {
-  "keyword": "music streaming",
-  "platform": "android",
+  "keyword": "meditation",
+  "platform": "ios",
   "country": "us",
-  "scores": {
-    "difficulty": {
-      "score": 8.56,
-      "components": {
-        "titleMatches": { 
-          "exact": 8, 
-          "broad": 1, 
-          "partial": 1, 
-          "none": 0, 
-          "score": 9.3 
-        },
-        "competitors": { 
-          "count": 42, 
-          "score": 7.35 
-        },
-        "installs": { 
-          "avg": 12500000, 
-          "score": 9.9 
-        },
-        "rating": { 
-          "avg": 4.5, 
-          "score": 9.0 
-        },
-        "age": { 
-          "avgDaysSinceUpdated": 48.2, 
-          "score": 5.8 
-        }
-      },
-      "interpretation": "Difficult to rank for"
+  "difficulty": {
+    "score": 88,
+    "interpretation": "Very Hard",
+    "breakdown": {
+      "ratingVolume": 94.7,
+      "reviewVelocity": 77.2,
+      "dominantPlayers": 73.9,
+      "ratingQuality": 94.9,
+      "marketAge": 100,
+      "publisherDiversity": 100,
+      "titleRelevance": 80
     },
-    "traffic": {
-      "score": 7.82,
-      "components": {
-        "suggest": { 
-          "length": 2, 
-          "index": 1, 
-          "score": 8.5 
-        },
-        "ranked": { 
-          "count": 7, 
-          "avgRank": 12.3, 
-          "score": 7.9 
-        },
-        "installs": { 
-          "avg": 12500000, 
-          "score": 9.9 
-        },
-        "length": { 
-          "length": 15, 
-          "score": 5.0 
-        }
-      },
-      "interpretation": "High search traffic"
-    }
+    "overrideReason": null,
+    "isBrandKeyword": false,
+    "brandName": null
+  },
+  "popularity": {
+    "score": 100,
+    "interpretation": "Very High"
+  },
+  "targetingAdvice": {
+    "label": "Worth Competing",
+    "description": "High demand but tough competition. Consider long-tail variants."
+  },
+  "competitors": {
+    "total": 25,
+    "medianReviews": 94261,
+    "avgRating": 4.83
   }
 }
 ```
 
-Each score has a human-readable interpretation to help understand its significance.
+**Scoring Guide:**
 
-**Note:** The current implementation simulates ASO scores based on keyword length and other heuristics rather than using real-time data. This approach was chosen due to compatibility issues between the aso package and current versions of the Google Play and App Store scrapers. The scores follow the same structure and interpretation guidelines as actual ASO metrics but should be considered approximations.
+| Difficulty (1-100) | Popularity (1-100) |
+|---|---|
+| 0-15: Very Easy | 50+: High demand |
+| 16-35: Easy | 30-49: Good search volume |
+| 36-55: Moderate | 15-29: Moderate volume |
+| 56-75: Hard | 5-14: Low volume |
+| 76-90: Very Hard | <5: Very few searches |
+| 91-100: Extreme | |
+
+**Targeting Advice Labels:**
+- **Sweet Spot**: High popularity + low difficulty — ideal keyword
+- **Good Target**: Solid popularity with manageable difficulty
+- **Worth Competing**: High demand but tough competition
+- **Hidden Gem**: Moderate volume with little competition
+- **Decent Option**: Moderate demand and competition
+- **Low Volume**: Easy to rank but few searches
+- **Avoid**: Low search volume with notable competition
+- **Challenging**: Strong competition, consider long-tail variants
 
 ### 12. suggest_keywords_by_category
 
