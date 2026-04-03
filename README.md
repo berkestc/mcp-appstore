@@ -42,6 +42,18 @@ Or: `claude mcp add --transport stdio mcp-appstore -- node /absolute/path/to/mcp
 
 **Claude Desktop:** Same `mcpServers` entry in `claude_desktop_config.json` (see Claude’s docs for the file path on your OS).
 
+### ASO Skill (Optional)
+
+The repo includes an ASO skill (`.claude/skills/app-store-optimization/SKILL.md`) that teaches Claude how to use the MCP tools effectively for keyword research, scoring, and metadata optimization.
+
+**To use it in any project**, copy it to your global skills directory:
+
+```bash
+cp -r /path/to/mcp-appstore/.claude/skills/app-store-optimization ~/.claude/skills/
+```
+
+This enables the `/app-store-optimization` skill in all your Claude Code projects.
+
 ## Available Tools
 
 The server provides the following tools:
