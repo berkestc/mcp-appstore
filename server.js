@@ -38,10 +38,6 @@ const memoizedAppStore = appStore.memoized({
   max: 1000 // Maximum cache size
 });
 
-// Create ASO clients for both platforms
-const gplayASO = aso('gplay');
-const itunesASO = aso('itunes');
-
 /**
  * Build a fresh MCP server instance (stdio or one HTTP request/session).
  */
