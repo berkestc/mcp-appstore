@@ -38,6 +38,98 @@ const memoizedAppStore = appStore.memoized({
   max: 1000 // Maximum cache size
 });
 
+// --------------------------------------------------------------------------- //
+// Rate-limit aware fetch & retry helpers
+// --------------------------------------------------------------------------- //
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Simple sequential queue to avoid hammering Apple's API
+let lastRequestTime = 0;
+const MIN_REQUEST_GAP_MS = 300; // minimum 300ms between requests
+
+async function throttledFetch(fn) {
+  const now = Date.now();
+  const gap = now - lastRequestTime;
+  if (gap < MIN_REQUEST_GAP_MS) {
+    await sleep(MIN_REQUEST_GAP_MS - gap);
+  }
+  lastRequestTime = Date.now();
+  return fn();
+}
+
+async function withRetry(fn, { retries = 3, baseDelay = 2000, label = 'API call' } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await throttledFetch(fn);
+    } catch (err) {
+      const status = err?.response?.statusCode || err?.status || 0;
+      const isRateLimit = status === 429 || status === 403;
+      const isLastAttempt = attempt === retries;
+
+      if (isLastAttempt || !isRateLimit) {
+        throw err;
+      }
+
+      const delay = baseDelay * Math.pow(2, attempt); // exponential: 2s, 4s, 8s
+      console.warn(`[Rate Limit] ${label} got ${status}, retry ${attempt + 1}/${retries} in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+}
+
+// Fetch competitors for a keyword with automatic fallback and retry
+async function fetchCompetitors(keyword, { country = 'us', num = 25 } = {}) {
+  // Try scraper with lookup first
+  try {
+    const searchResults = await withRetry(
+      () => memoizedAppStore.search({ term: keyword, num: Math.min(Math.max(num, 1), 50), country }),
+      { label: `search "${keyword}"` }
+    );
+
+    const detailPromises = searchResults.map(app =>
+      withRetry(
+        () => memoizedAppStore.app({ id: app.id, country, ratings: true }),
+        { label: `lookup ${app.id}`, retries: 1, baseDelay: 1000 }
+      ).catch(() => null)
+    );
+    const fullResults = await Promise.all(detailPromises);
+    const hasDetails = fullResults.some(r => r !== null);
+
+    if (hasDetails) {
+      return fullResults.map((app, i) => {
+        const src = app || searchResults[i];
+        return {
+          trackName: src.title || src.trackName || '',
+          userRatingCount: src.reviews || src.userRatingCount || 0,
+          averageUserRating: src.score || src.averageUserRating || 0,
+          releaseDate: src.released || src.releaseDate || '',
+          sellerName: src.developer || src.sellerName || '',
+          primaryGenreName: src.primaryGenre || src.primaryGenreName || '',
+        };
+      });
+    }
+  } catch { /* fall through to iTunes fallback */ }
+
+  // Fallback: direct iTunes Search API
+  const itunesResp = await withRetry(
+    () => fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(keyword)}&country=${country}&entity=software&limit=${Math.min(Math.max(num, 1), 50)}`).then(r => {
+      if (!r.ok) throw Object.assign(new Error(`iTunes ${r.status}`), { status: r.status });
+      return r.json();
+    }),
+    { label: `iTunes fallback "${keyword}"` }
+  );
+
+  return (itunesResp.results || []).map(r => ({
+    trackName: r.trackName || '',
+    userRatingCount: r.userRatingCount || 0,
+    averageUserRating: r.averageUserRating || 0,
+    releaseDate: r.releaseDate || '',
+    sellerName: r.sellerName || '',
+    primaryGenreName: r.primaryGenreName || '',
+  }));
+}
+
 /**
  * Build a fresh MCP server instance (stdio or one HTTP request/session).
  */
@@ -1681,54 +1773,7 @@ server.tool(
   },
   async ({ keyword, platform, country, num }) => {
     try {
-      // Search App Store for the keyword
-      const searchResults = await memoizedAppStore.search({
-        term: keyword,
-        num: Math.min(Math.max(num, 1), 50),
-        country,
-      });
-
-      // Try to fetch full details for each app (needed for total reviews).
-      // Some countries (e.g. TR) block the lookup API with 403, so we
-      // fall back to search results + direct iTunes Search API data.
-      let competitors;
-      try {
-        const detailPromises = searchResults.map(app =>
-          memoizedAppStore.app({ id: app.id, country, ratings: true }).catch(() => null)
-        );
-        const fullResults = await Promise.all(detailPromises);
-        const hasDetails = fullResults.some(r => r !== null);
-
-        if (hasDetails) {
-          competitors = fullResults.map((app, i) => {
-            const src = app || searchResults[i];
-            return {
-              trackName: src.title || src.trackName || '',
-              userRatingCount: src.reviews || src.userRatingCount || 0,
-              averageUserRating: src.score || src.averageUserRating || 0,
-              releaseDate: src.released || src.releaseDate || '',
-              sellerName: src.developer || src.sellerName || '',
-              primaryGenreName: src.primaryGenre || src.primaryGenreName || '',
-            };
-          });
-        } else {
-          throw new Error('Lookup blocked');
-        }
-      } catch {
-        // Fallback: use direct iTunes Search API which works for all countries
-        const itunesResp = await fetch(
-          `https://itunes.apple.com/search?term=${encodeURIComponent(keyword)}&country=${country}&entity=software&limit=${Math.min(Math.max(num, 1), 50)}`
-        );
-        const itunesData = await itunesResp.json();
-        competitors = (itunesData.results || []).map(r => ({
-          trackName: r.trackName || '',
-          userRatingCount: r.userRatingCount || 0,
-          averageUserRating: r.averageUserRating || 0,
-          releaseDate: r.releaseDate || '',
-          sellerName: r.sellerName || '',
-          primaryGenreName: r.primaryGenreName || '',
-        }));
-      }
+      const competitors = await fetchCompetitors(keyword, { country, num });
 
       // Calculate scores
       const difficulty = calculateDifficulty(competitors, keyword);
@@ -1826,48 +1871,11 @@ server.tool(
         };
       }
 
-      // Step 2: Score each suggestion
+      // Step 2: Score each suggestion sequentially (respects rate limits)
       const scoredResults = [];
       for (const suggestion of suggestions) {
         try {
-          let competitors;
-          try {
-            const searchResults = await memoizedAppStore.search({ term: suggestion, num: 25, country });
-            const detailPromises = searchResults.map(app =>
-              memoizedAppStore.app({ id: app.id, country, ratings: true }).catch(() => null)
-            );
-            const fullResults = await Promise.all(detailPromises);
-            const hasDetails = fullResults.some(r => r !== null);
-            if (hasDetails) {
-              competitors = fullResults.map((app, i) => {
-                const src = app || searchResults[i];
-                return {
-                  trackName: src.title || src.trackName || '',
-                  userRatingCount: src.reviews || src.userRatingCount || 0,
-                  averageUserRating: src.score || src.averageUserRating || 0,
-                  releaseDate: src.released || src.releaseDate || '',
-                  sellerName: src.developer || src.sellerName || '',
-                  primaryGenreName: src.primaryGenre || src.primaryGenreName || '',
-                };
-              });
-            } else {
-              throw new Error('Lookup blocked');
-            }
-          } catch {
-            const itunesResp = await fetch(
-              `https://itunes.apple.com/search?term=${encodeURIComponent(suggestion)}&country=${country}&entity=software&limit=25`
-            );
-            const itunesData = await itunesResp.json();
-            competitors = (itunesData.results || []).map(r => ({
-              trackName: r.trackName || '',
-              userRatingCount: r.userRatingCount || 0,
-              averageUserRating: r.averageUserRating || 0,
-              releaseDate: r.releaseDate || '',
-              sellerName: r.sellerName || '',
-              primaryGenreName: r.primaryGenreName || '',
-            }));
-          }
-
+          const competitors = await fetchCompetitors(suggestion, { country, num: 25 });
           const difficulty = calculateDifficulty(competitors, suggestion);
           const popularityScore = estimatePopularity(competitors, suggestion);
           const kei = Math.round(popularityScore * (100 - difficulty.score) / 100);
