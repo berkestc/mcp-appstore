@@ -46,7 +46,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // Simple sequential queue to avoid hammering Apple's API
 let lastRequestTime = 0;
-const MIN_REQUEST_GAP_MS = 300; // minimum 300ms between requests
+const MIN_REQUEST_GAP_MS = 1500; // minimum 1.5s between requests (Apple rate limits aggressively for some countries)
 
 async function throttledFetch(fn) {
   const now = Date.now();
@@ -58,7 +58,7 @@ async function throttledFetch(fn) {
   return fn();
 }
 
-async function withRetry(fn, { retries = 3, baseDelay = 2000, label = 'API call' } = {}) {
+async function withRetry(fn, { retries = 3, baseDelay = 5000, label = 'API call' } = {}) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       return await throttledFetch(fn);
@@ -71,8 +71,9 @@ async function withRetry(fn, { retries = 3, baseDelay = 2000, label = 'API call'
         throw err;
       }
 
-      const delay = baseDelay * Math.pow(2, attempt); // exponential: 2s, 4s, 8s
-      console.warn(`[Rate Limit] ${label} got ${status}, retry ${attempt + 1}/${retries} in ${delay}ms`);
+      // Aggressive backoff: 5s, 15s, 45s — Apple needs long cooldowns
+      const delay = baseDelay * Math.pow(3, attempt);
+      console.warn(`[Rate Limit] ${label} got ${status}, retry ${attempt + 1}/${retries} in ${Math.round(delay/1000)}s`);
       await sleep(delay);
     }
   }
