@@ -1688,25 +1688,47 @@ server.tool(
         country,
       });
 
-      // Fetch full details for each app (needed for userRatingCount, releaseDate, etc.)
-      const detailPromises = searchResults.map(app => {
-        try {
-          return memoizedAppStore.app({ id: app.id, country, ratings: true });
-        } catch (err) {
-          return app;
-        }
-      });
-      const fullResults = await Promise.all(detailPromises);
+      // Try to fetch full details for each app (needed for total reviews).
+      // Some countries (e.g. TR) block the lookup API with 403, so we
+      // fall back to search results + direct iTunes Search API data.
+      let competitors;
+      try {
+        const detailPromises = searchResults.map(app =>
+          memoizedAppStore.app({ id: app.id, country, ratings: true }).catch(() => null)
+        );
+        const fullResults = await Promise.all(detailPromises);
+        const hasDetails = fullResults.some(r => r !== null);
 
-      // Normalize to the format scoring.js expects
-      const competitors = fullResults.map(app => ({
-        trackName: app.title || app.trackName || '',
-        userRatingCount: app.reviews || app.userRatingCount || 0,
-        averageUserRating: app.score || app.averageUserRating || 0,
-        releaseDate: app.released || app.releaseDate || '',
-        sellerName: app.developer || app.sellerName || '',
-        primaryGenreName: app.primaryGenre || app.primaryGenreName || '',
-      }));
+        if (hasDetails) {
+          competitors = fullResults.map((app, i) => {
+            const src = app || searchResults[i];
+            return {
+              trackName: src.title || src.trackName || '',
+              userRatingCount: src.reviews || src.userRatingCount || 0,
+              averageUserRating: src.score || src.averageUserRating || 0,
+              releaseDate: src.released || src.releaseDate || '',
+              sellerName: src.developer || src.sellerName || '',
+              primaryGenreName: src.primaryGenre || src.primaryGenreName || '',
+            };
+          });
+        } else {
+          throw new Error('Lookup blocked');
+        }
+      } catch {
+        // Fallback: use direct iTunes Search API which works for all countries
+        const itunesResp = await fetch(
+          `https://itunes.apple.com/search?term=${encodeURIComponent(keyword)}&country=${country}&entity=software&limit=${Math.min(Math.max(num, 1), 50)}`
+        );
+        const itunesData = await itunesResp.json();
+        competitors = (itunesData.results || []).map(r => ({
+          trackName: r.trackName || '',
+          userRatingCount: r.userRatingCount || 0,
+          averageUserRating: r.averageUserRating || 0,
+          releaseDate: r.releaseDate || '',
+          sellerName: r.sellerName || '',
+          primaryGenreName: r.primaryGenreName || '',
+        }));
+      }
 
       // Calculate scores
       const difficulty = calculateDifficulty(competitors, keyword);
@@ -1808,27 +1830,43 @@ server.tool(
       const scoredResults = [];
       for (const suggestion of suggestions) {
         try {
-          const searchResults = await memoizedAppStore.search({
-            term: suggestion,
-            num: 25,
-            country,
-          });
-
-          const detailPromises = searchResults.map(app => {
-            try {
-              return memoizedAppStore.app({ id: app.id, country, ratings: true });
-            } catch { return app; }
-          });
-          const fullResults = await Promise.all(detailPromises);
-
-          const competitors = fullResults.map(app => ({
-            trackName: app.title || '',
-            userRatingCount: app.reviews || 0,
-            averageUserRating: app.score || 0,
-            releaseDate: app.released || '',
-            sellerName: app.developer || '',
-            primaryGenreName: app.primaryGenre || '',
-          }));
+          let competitors;
+          try {
+            const searchResults = await memoizedAppStore.search({ term: suggestion, num: 25, country });
+            const detailPromises = searchResults.map(app =>
+              memoizedAppStore.app({ id: app.id, country, ratings: true }).catch(() => null)
+            );
+            const fullResults = await Promise.all(detailPromises);
+            const hasDetails = fullResults.some(r => r !== null);
+            if (hasDetails) {
+              competitors = fullResults.map((app, i) => {
+                const src = app || searchResults[i];
+                return {
+                  trackName: src.title || src.trackName || '',
+                  userRatingCount: src.reviews || src.userRatingCount || 0,
+                  averageUserRating: src.score || src.averageUserRating || 0,
+                  releaseDate: src.released || src.releaseDate || '',
+                  sellerName: src.developer || src.sellerName || '',
+                  primaryGenreName: src.primaryGenre || src.primaryGenreName || '',
+                };
+              });
+            } else {
+              throw new Error('Lookup blocked');
+            }
+          } catch {
+            const itunesResp = await fetch(
+              `https://itunes.apple.com/search?term=${encodeURIComponent(suggestion)}&country=${country}&entity=software&limit=25`
+            );
+            const itunesData = await itunesResp.json();
+            competitors = (itunesData.results || []).map(r => ({
+              trackName: r.trackName || '',
+              userRatingCount: r.userRatingCount || 0,
+              averageUserRating: r.averageUserRating || 0,
+              releaseDate: r.releaseDate || '',
+              sellerName: r.sellerName || '',
+              primaryGenreName: r.primaryGenreName || '',
+            }));
+          }
 
           const difficulty = calculateDifficulty(competitors, suggestion);
           const popularityScore = estimatePopularity(competitors, suggestion);
