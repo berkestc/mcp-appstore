@@ -785,7 +785,51 @@ const result = await client.callTool({
 - **Avoid**: Low search volume with notable competition
 - **Challenging**: Strong competition, consider long-tail variants
 
-### 12. suggest_keywords_by_category
+### 12. suggest_and_score_keywords
+
+Discovers keyword opportunities by fetching App Store autocomplete suggestions for a seed keyword, then scoring each suggestion for difficulty, popularity, and KEI (Keyword Effectiveness Index).
+
+**Parameters:**
+
+- `keyword`: The seed keyword to get suggestions for (e.g., 'meditation', 'fitness').
+- `country` (optional): Two-letter country code. Default 'us'.
+- `maxSuggestions` (optional): Maximum suggestions to score (1-10, default 10).
+
+**Example usage:**
+```javascript
+const result = await client.callTool({
+  name: "suggest_and_score_keywords",
+  arguments: {
+    keyword: "fitness",
+    country: "us",
+    maxSuggestions: 5
+  }
+});
+```
+
+**Response:**
+```json
+{
+  "seedKeyword": "fitness",
+  "country": "us",
+  "totalSuggestions": 5,
+  "results": [
+    {
+      "keyword": "fitness 19",
+      "difficulty": 30,
+      "popularity": 64,
+      "kei": 45,
+      "targetingAdvice": { "label": "Sweet Spot", "description": "High popularity + low difficulty — ideal keyword to target with good ASO." },
+      "competitorCount": 25,
+      "medianReviews": 1200
+    }
+  ]
+}
+```
+
+Results are sorted by KEI (highest first). Higher KEI = better opportunity (high popularity + low difficulty).
+
+### 13. suggest_keywords_by_category
 
 Get keyword suggestions based on apps in the same category as the target app.
 

@@ -1769,6 +1769,119 @@ server.tool(
   }
 );
 
+// Tool to discover and score keyword suggestions from App Store autocomplete
+server.tool(
+  "suggest_and_score_keywords",
+  {
+    keyword: z.string().describe("The seed keyword to get suggestions for (e.g., 'meditation', 'fitness')."),
+    country: z.string().length(2).optional().default("us").describe("Two-letter country code. Default 'us'."),
+    maxSuggestions: z.number().optional().default(10).describe("Maximum suggestions to score (1-10, default 10). Each suggestion requires an App Store search, so lower = faster.")
+  },
+  async ({ keyword, country, maxSuggestions }) => {
+    try {
+      // Step 1: Get autocomplete suggestions from Apple
+      const storeFrontMap = {
+        us: '143441-1,29', gb: '143444-1,29', de: '143443-1,29',
+        fr: '143442-1,29', jp: '143462-1,29', kr: '143466-1,29',
+        cn: '143465-1,29', br: '143503-1,29', tr: '143480-1,29',
+        au: '143460-1,29', ca: '143455-1,29', in: '143467-1,29',
+        it: '143450-1,29', es: '143454-1,29', mx: '143468-1,29',
+        nl: '143452-1,29', se: '143456-1,29', ru: '143469-1,29',
+      };
+      const storeFront = storeFrontMap[country.toLowerCase()] || '143441-1,29';
+
+      const hintsResp = await fetch(
+        `https://search.itunes.apple.com/WebObjects/MZSearchHints.woa/wa/hints?clientApplication=Software&term=${encodeURIComponent(keyword)}&media=software`,
+        { headers: { 'X-Apple-Store-Front': storeFront, 'User-Agent': 'iTunes/12.0' } }
+      );
+      const hintsText = await hintsResp.text();
+      const suggestions = [...hintsText.matchAll(/<key>term<\/key>\s*<string>([^<]+)<\/string>/g)]
+        .map(m => m[1])
+        .slice(0, Math.min(Math.max(maxSuggestions, 1), 10));
+
+      if (!suggestions.length) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ keyword, country, suggestions: [], message: "No autocomplete suggestions found." }, null, 2)
+          }]
+        };
+      }
+
+      // Step 2: Score each suggestion
+      const scoredResults = [];
+      for (const suggestion of suggestions) {
+        try {
+          const searchResults = await memoizedAppStore.search({
+            term: suggestion,
+            num: 25,
+            country,
+          });
+
+          const detailPromises = searchResults.map(app => {
+            try {
+              return memoizedAppStore.app({ id: app.id, country, ratings: true });
+            } catch { return app; }
+          });
+          const fullResults = await Promise.all(detailPromises);
+
+          const competitors = fullResults.map(app => ({
+            trackName: app.title || '',
+            userRatingCount: app.reviews || 0,
+            averageUserRating: app.score || 0,
+            releaseDate: app.released || '',
+            sellerName: app.developer || '',
+            primaryGenreName: app.primaryGenre || '',
+          }));
+
+          const difficulty = calculateDifficulty(competitors, suggestion);
+          const popularityScore = estimatePopularity(competitors, suggestion);
+          const kei = Math.round(popularityScore * (100 - difficulty.score) / 100);
+          const advice = getTargetingAdvice(popularityScore, difficulty.score);
+
+          scoredResults.push({
+            keyword: suggestion,
+            difficulty: difficulty.score,
+            popularity: popularityScore,
+            kei,
+            targetingAdvice: advice,
+            competitorCount: competitors.length,
+            medianReviews: difficulty.medianReviews,
+          });
+        } catch (err) {
+          scoredResults.push({
+            keyword: suggestion,
+            error: err.message,
+          });
+        }
+      }
+
+      // Step 3: Sort by KEI (best opportunities first)
+      scoredResults.sort((a, b) => (b.kei || 0) - (a.kei || 0));
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            seedKeyword: keyword,
+            country,
+            totalSuggestions: suggestions.length,
+            results: scoredResults,
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ error: error.message, keyword, country }, null, 2)
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
 return server;
 }
 
